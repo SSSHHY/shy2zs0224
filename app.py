@@ -16,142 +16,186 @@ st.markdown("""
 st.title("🏥 医疗器械采购计划智能分析平台")
 
 # --- 2. 侧边栏配置 ---
-st.sidebar.header("⚙️ 配置选项")
+st.sidebar.header("⚙️ 模式切换")
 template_type = st.sidebar.radio(
-    "选择当前的业务模式",
-    ["旧版模式 (仅计划表分析)", "新版模式 (计划与仓库联动)"]
+    "选择模板模式",
+    ["旧版模式 (2025总计划格式)", "新版模式 (计划与仓库联动)"]
 )
 
 st.sidebar.markdown("---")
-st.sidebar.header("📁 上传数据源")
+st.sidebar.header("📁 数据上传")
 
-# 无论哪种模式都要上传计划表
-plan_files = st.sidebar.file_uploader("上传【采购计划表】(支持多选 xls/xlsx/csv)", accept_multiple_files=True)
+# 计划表上传
+plan_files = st.sidebar.file_uploader("上传【采购计划表】(支持多选)", accept_multiple_files=True, type=['csv', 'xlsx', 'xls'])
 
-# 【核心改动】仅在新版模式下显示结存表上传
+# 仅在新版模式显示仓库结存上传
 stock_file = None
 if template_type == "新版模式 (计划与仓库联动)":
-    st.sidebar.info("提示：请先上传采购计划，再上传仓库结存表进行比对。")
+    st.sidebar.info("💡 请先上传计划，再上传结存表对比")
     stock_file = st.sidebar.file_uploader("上传【仓库结存表】", type=['xls', 'xlsx', 'csv'])
 
-# --- 3. 强化版数据读取函数 (自动找标题行) ---
-def load_data_smart(file):
+# --- 3. 增强版读取函数 (解决重复列名报错) ---
+def load_and_clean_universal(file, mode):
     try:
-        # 读取原始数据
+        # 设置跳行逻辑
+        skip = 3 if mode == "旧版模式 (2025总计划格式)" else 2
+        
+        # 读取文件
         if file.name.endswith('.csv'):
-            df_raw = pd.read_csv(file, header=None)
+            df = pd.read_csv(file, skiprows=skip)
         elif file.name.endswith('.xls'):
-            df_raw = pd.read_excel(file, header=None, engine='xlrd')
+            df = pd.read_excel(file, skiprows=skip, engine='xlrd')
         else:
-            df_raw = pd.read_excel(file, header=None, engine='openpyxl')
+            df = pd.read_excel(file, skiprows=skip, engine='openpyxl')
         
-        # 自动定位标题行：寻找包含“名称”关键词的行
-        header_idx = 0
-        found = False
-        for i, row in df_raw.head(20).iterrows():
-            row_values = [str(val) for val in row.values]
-            if any(k in val for val in row_values for k in ["产品名称", "耗材名称", "产品名称"]):
-                header_idx = i
-                found = True
-                break
-        
-        df = df_raw.iloc[header_idx:].copy()
-        df.columns = df.iloc[0] # 设为标题
-        df = df[1:] # 移除标题行本身
-        
-        # 提取月份标签
-        month_label = file.name.split('.')[0]
-        df['数据月份'] = month_label
-        
-        # 【关键修复】统一列名映射，解决 KeyError
-        col_map = {
-            '耗材名称': '产品名称',
-            '厂商': '生产厂商',
-            '生产厂家': '生产厂商',
-            '生产企业（国内一级代理）': '生产厂商',
-            '结存数量': '仓库结存',
-            '供应医院价格（单位：元）': '价格'
-        }
-        # 批量重命名存在的列
-        df.rename(columns=lambda x: col_map.get(str(x).strip(), str(x).strip()), inplace=True)
-        
-        # 清洗
+        # 【核心修复】处理重复列名，防止 concat 报错
+        if not df.columns.is_unique:
+            new_cols = []
+            counts = {}
+            for col in df.columns:
+                col_str = str(col)
+                if col_str in counts:
+                    counts[col_str] += 1
+                    new_cols.append(f"{col_str}_{counts[col_str]}")
+                else:
+                    counts[col_str] = 0
+                    new_cols.append(col_str)
+            df.columns = new_cols
+
+        # 过滤空行
         if '产品名称' in df.columns:
             df = df.dropna(subset=['产品名称'])
-            df['产品名称'] = df['产品名称'].astype(str).str.strip()
+        else:
+            # 兼容性：如果找不到“产品名称”列，尝试寻找第一列非空的作为名称
+            st.error(f"文件 {file.name} 缺少『产品名称』列，请检查格式。")
+            return None
+
+        # 提取月份
+        df['所属月份'] = file.name.split('.')[0]
         
-        # 数值化
-        for col in ['数量', '金额', '价格', '仓库结存']:
+        # 字段映射与转换 (融合旧版逻辑)
+        col_map = {
+            '生产企业（国内一级代理）': '生产厂商',
+            '厂商': '生产厂商',
+            '耗材名称': '产品名称',
+            '结存数量': '仓库结存'
+        }
+        df.rename(columns=col_map, inplace=True)
+
+        # 数值转换 (完全保留旧版逻辑)
+        num_cols = ['数量', '金额', '供应医院价格（单位：元）', '价格', '仓库结存']
+        for col in num_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        
+        # 文本转换 (完全保留旧版逻辑)
+        for col in ['产品名称', '型号', '规格', '生产厂商']:
+            if col in df.columns:
+                df[col] = df[col].astype(str).replace('nan', '-').str.strip()
                 
         return df
     except Exception as e:
         st.error(f"解析文件 {file.name} 失败: {e}")
         return None
 
-# --- 4. 执行仓库数据逻辑 ---
-stock_summary = None
-if stock_file:
-    s_df = load_data_smart(stock_file)
-    if s_df is not None:
-        if '产品名称' in s_df.columns:
-            # 兼容：如果结存表里叫生产厂商
-            v_col = '生产厂商' if '生产厂商' in s_df.columns else s_df.columns[0]
-            # 汇总（处理多批次）
-            stock_summary = s_df.groupby(['产品名称', v_col])['仓库结存'].sum().reset_index()
-            stock_summary.columns = ['产品名称', '生产厂商', '仓库结存']
-            st.sidebar.success("✅ 仓库结存表已匹配")
-
-# --- 5. 执行计划表分析逻辑 ---
+# --- 4. 处理逻辑 ---
 if plan_files:
-    all_dfs = [load_data_smart(f) for f in plan_files if load_data_smart(f) is not None]
+    all_dfs = [load_and_clean_universal(f, template_type) for f in plan_files]
+    all_dfs = [d for d in all_dfs if d is not None]
     
     if all_dfs:
-        full_df = pd.concat(all_dfs, ignore_index=True)
-        available_months = sorted(full_df['数据月份'].unique())
+        # 使用 ignore_index=True 合并
+        try:
+            full_df = pd.concat(all_dfs, ignore_index=True)
+        except Exception as e:
+            st.error(f"合并文件时出错: {e}。请确保所有上传的计划表格式一致。")
+            st.stop()
+            
+        available_months = sorted(full_df['所属月份'].unique())
         num_months = len(available_months)
-        
-        # 指标卡
-        st.header(f"📊 采购数据概览 (共 {num_months} 个月)")
+
+        # --- A. 仓库联动逻辑 (仅新版) ---
+        if template_type == "新版模式 (计划与仓库联动)" and stock_file:
+            s_df = load_and_clean_universal(stock_file, "新版模式")
+            if s_df is not None:
+                # 汇总库存
+                s_sum = s_df.groupby(['产品名称', '生产厂商'])['仓库结存'].sum().reset_index()
+                # 合并
+                full_df = pd.merge(full_df, s_sum, on=['产品名称', '生产厂商'], how='left')
+                full_df['仓库结存'] = full_df['仓库结存'].fillna(0)
+                st.sidebar.success("✅ 仓库结存已关联")
+
+        # --- B. 数据概览指标 ---
+        st.header(f"📊 采购概览 (共 {num_months} 个月数据)")
+        # 兼容旧版选择
         target_col = st.sidebar.selectbox("分析目标", ["数量", "金额"])
         
         c1, c2, c3 = st.columns(3)
         c1.metric("总品种数", f"{full_df['产品名称'].nunique()} 种")
         c2.metric(f"累计{target_col}", f"{full_df[target_col].sum():,.0f}")
-        c3.metric("月均单品需求", f"{(full_df[target_col].sum() / num_months / full_df['产品名称'].nunique()):,.2f}")
+        c3.metric(f"月均单品{target_col}", f"{(full_df[target_col].sum() / num_months / full_df['产品名称'].nunique()):,.2f}")
 
-        # --- 联动逻辑 ---
-        if template_type == "新版模式 (计划与仓库联动)" and stock_summary is not None:
-            # 联动合并
-            full_df = pd.merge(full_df, stock_summary, on=['产品名称', '生产厂商'], how='left')
-            full_df['仓库结存'] = full_df['仓库结存'].fillna(0)
-            
-            st.header("🔍 采购 vs 仓库库存 联动表")
-            display_df = full_df[['产品名称', '型号', '生产厂商', '数量', '仓库结存', '数据月份']].copy()
-            st.dataframe(display_df.style.background_gradient(subset=['仓库结存'], cmap='Greens'), use_container_width=True)
-        else:
-            # 旧版或未上传库存时，仅显示计划
-            st.header("🔍 采购明细统计")
-            pivot_df = full_df.pivot_table(index=['产品名称', '型号'], columns='数据月份', values=target_col, aggfunc='sum').fillna(0)
-            pivot_df['月平均'] = pivot_df.sum(axis=1) / num_months
-            st.dataframe(pivot_df.style.background_gradient(cmap='YlOrRd'), use_container_width=True)
+        # --- C. 深度分析表 (均值) ---
+        st.header(f"🔍 产品明细与月均值 ({target_col})")
+        
+        # 计算透视表
+        p_idx = ['产品名称', '型号']
+        if '生产厂商' in full_df.columns: p_idx.append('生产厂商')
+        
+        pivot_df = full_df.pivot_table(
+            index=p_idx, 
+            columns='所属月份', 
+            values=target_col, 
+            aggfunc='sum'
+        ).fillna(0)
+        
+        pivot_df['累计总计'] = pivot_df.sum(axis=1)
+        pivot_df['月均数值'] = pivot_df['累计总计'] / num_months
+        pivot_df = pivot_df.sort_values(by='月均数值', ascending=False).reset_index()
 
-        # --- 变动分析 ---
+        # 如果有库存数据，拼进去
+        if '仓库结存' in full_df.columns:
+            latest_s = full_df.groupby(p_idx)['仓库结存'].last().reset_index()
+            pivot_df = pd.merge(pivot_df, latest_s, on=p_idx, how='left')
+
+        st.dataframe(
+            pivot_df.style.background_gradient(subset=['月均数值'], cmap='YlOrRd').format(precision=2),
+            use_container_width=True
+        )
+
+        # --- D. 变动分析 (较往月) ---
         if num_months >= 2:
-            st.header("🆕 较上月新增产品")
+            st.header("🆕 采购变动分析 (较上月)")
             curr_m, prev_m = available_months[-1], available_months[-2]
-            new_items = set(full_df[full_df['数据月份']==curr_m]['产品名称']) - set(full_df[full_df['数据月份']==prev_m]['产品名称'])
-            if new_items:
-                st.write(f"相比于 {prev_m}，本月新增了 {len(new_items)} 种产品：")
-                st.info(", ".join(list(new_items)[:15]) + " 等...")
+            
+            curr_set = set(full_df[full_df['所属月份']==curr_m]['产品名称'] + " | " + full_df[full_df['所属月份']==curr_m]['型号'])
+            prev_set = set(full_df[full_df['所属月份']==prev_m]['产品名称'] + " | " + full_df[full_df['所属月份']==prev_m]['型号'])
+            
+            new_keys = curr_set - prev_set
+            if new_keys:
+                st.success(f"📌 相比于 {prev_m}，{curr_m} 新增了 {len(new_keys)} 款产品")
+                with st.expander("点击查看新增明细"):
+                    new_list = [k.split(" | ") for k in new_keys]
+                    st.table(pd.DataFrame(new_list, columns=['产品名称', '型号']))
             else:
-                st.write("本月无新增产品。")
+                st.info("本月无新增产品。")
 
-        # 可视化
-        st.subheader("采购趋势分析")
-        fig = px.bar(full_df.groupby(['产品名称', '数据月份'])[target_col].sum().reset_index().head(20), 
-                     x='产品名称', y=target_col, color='数据月份', barmode='group')
+        # --- E. 可视化排行 ---
+        st.subheader("Top 15 产品月均采购排行")
+        top_15 = pivot_df.head(15)
+        fig = px.bar(top_15, x='产品名称', y='月均数值', color='型号' if '型号' in top_15.columns else None, text_auto='.2s')
         st.plotly_chart(fig, use_container_width=True)
+
+        # --- F. 智能助手 ---
+        st.header("🤖 智能分析助手")
+        q = st.text_input("您可以提问，例如：'新增了哪些东西？'")
+        if q:
+            if "新增" in q or "增加" in q:
+                st.write("助手：请查看下方的『采购变动分析』板块。")
+            elif "最高" in q:
+                top_p = pivot_df.iloc[0]['产品名称']
+                st.write(f"助手：目前月均{target_col}最高的产品是 **{top_p}**。")
+            else:
+                st.write("助手：我可以帮您分析新增产品、月均数值和趋势排行。")
 else:
-    st.info("💡 请在左侧上传文件开始分析。旧版仅需上传计划表，新版可额外上传结存表。")
+    st.info("💡 请在左侧上传文件开始分析。旧版模式只需要上传计划表。")
