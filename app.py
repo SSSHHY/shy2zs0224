@@ -150,7 +150,7 @@ else:
                     merged = pd.merge(full_plan, s_sum, on=['产品名称', '生产厂商'], how='left')
                     merged['仓库库存'] = merged['仓库库存'].fillna(0)
                     
-                    st.header("🔍 计划与库存联动清单 (已修复数据合并问题)")
+                    st.header("🔍 计划与库存联动清单")
                     # 选择展示列
                     cols_to_show = ['产品名称', '型号', '生产厂商', '数量', '仓库库存', '金额']
                     exist_cols = [c for c in cols_to_show if c in merged.columns]
@@ -160,3 +160,4 @@ else:
             else:
                 st.dataframe(full_plan, use_container_width=True)
                 st.warning("👈 请在左侧上传仓库结存表以开启联动。")
+
