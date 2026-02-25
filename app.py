@@ -15,10 +15,7 @@ st.title("🏥 医疗器械采购计划智能分析平台")
 
 # --- 2. 侧边栏模式选择 ---
 st.sidebar.header("⚙️ 模式选择")
-mode = st.sidebar.radio(
-    "请选择功能模式",
-    ["旧版：多月计划对比分析", "新版：计划与仓库联动"]
-)
+mode = st.sidebar.radio("请选择功能模式", ["旧版：多月计划对比分析", "新版：计划与仓库联动"])
 st.sidebar.markdown("---")
 st.sidebar.header("📁 上传区域")
 
@@ -35,18 +32,14 @@ if mode == "旧版：多月计划对比分析":
             else:
                 df = pd.read_excel(file, skiprows=3, engine='openpyxl')
 
-            # 解决重复列名导致的 InvalidIndexError
             df.columns = [f"{c}_{i}" if list(df.columns).count(c) > 1 else c for i, c in enumerate(df.columns)]
-
             df = df.dropna(subset=['产品名称'])
             df['所属月份'] = file.name.split('.')[0]
 
-            # 数值转换
             for col in ['数量', '金额', '供应医院价格（单位：元）']:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-            # 文本清洗
             for col in ['产品名称', '型号', '规格']:
                 if col in df.columns:
                     df[col] = df[col].astype(str).replace('nan', '-')
@@ -76,10 +69,13 @@ if mode == "旧版：多月计划对比分析":
             pivot_df = pivot_df.sort_values(by='月均数值', ascending=False).reset_index()
             st.dataframe(pivot_df.style.background_gradient(subset=['月均数值'], cmap='YlOrRd').format(precision=2), use_container_width=True)
 
-# --- 4. 【新版逻辑分支】独立智能识别 + 字段统一 + 顺序保持 + 缺失逻辑 ---
+# --- 4. 【新版逻辑分支】严格三键匹配 + 保留缺失为NA + 顺序保持 + 未匹配则数量金额缺失 ---
 else:
     plan_files = st.sidebar.file_uploader("1. 上传【新版计划表】", accept_multiple_files=True, type=['csv', 'xlsx', 'xls'])
     stock_file = st.sidebar.file_uploader("2. 上传【仓库结存表】", type=['csv', 'xlsx', 'xls'])
+
+    # ✅ 固定三键，不允许退化
+    JOIN_KEYS = ['产品名称', '型号', '生产厂商']
 
     def load_new_smart(file):
         try:
@@ -102,31 +98,42 @@ else:
             df.columns = df.iloc[0]
             df = df[1:].copy()
 
-            # 字段映射：耗材名称->产品名称, 规格->型号, 厂商/生产厂商/生产厂家->生产厂商, 结存数量->仓库库存
+            # 字段映射（你要求的对应）
             name_map = {
                 '耗材名称': '产品名称',
                 '产品名称': '产品名称',
                 '规格': '型号',
                 '型号': '型号',
                 '厂商': '生产厂商',
-                '生产厂商': '生产厂商',
                 '生产厂家': '生产厂商',
+                '生产厂商': '生产厂商',
                 '结存数量': '仓库库存',
                 '仓库库存': '仓库库存',
             }
             df.rename(columns=lambda x: name_map.get(str(x).strip(), str(x).strip()), inplace=True)
 
-            # 文本清洗
-            for col in ['产品名称', '型号', '生产厂商']:
-                if col in df.columns:
-                    df[col] = df[col].astype(str).str.strip().replace(['nan', 'None', '-'], '')
+            # ✅ 确保三键列一定存在（缺就补 NA）
+            for k in JOIN_KEYS:
+                if k not in df.columns:
+                    df[k] = pd.NA
 
-            # 数值转换（不强制 fillna(0)，保留缺失以便后续判断）
+            # ✅ 关键：文本列用 pandas string dtype，保留 NA，不要变成 ''
+            for col in JOIN_KEYS:
+                df[col] = df[col].astype("string").str.strip()
+
+                # 把常见“伪缺失”统一成 NA（注意：这里不要转成空字符串）
+                df[col] = df[col].replace(
+                    to_replace=[pd.NA, "nan", "None", "-", "", " "],
+                    value=pd.NA
+                )
+
+            # 数值列（允许缺失）
             for col in ['数量', '金额', '价格', '仓库库存']:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
 
             return df
+
         except Exception as e:
             st.error(f"读取失败 ({file.name}): {e}")
             return None
@@ -134,63 +141,45 @@ else:
     if plan_files:
         plans = [load_new_smart(f) for f in plan_files if load_new_smart(f) is not None]
         if plans:
-            # 合并计划表（保留原始行顺序锚点）
+            # 合并计划表 + 顺序锚点
             full_plan_raw = pd.concat(plans, ignore_index=True)
             full_plan_raw['_order'] = range(len(full_plan_raw))
 
-            # 合并关键列
-            join_keys = ['产品名称', '型号', '生产厂商']
-            actual_keys = [c for c in join_keys if c in full_plan_raw.columns]
+            # 计划汇总：同物料多行相加，并保留第一次出现顺序
+            order_df = full_plan_raw.groupby(JOIN_KEYS, as_index=False, dropna=False)['_order'].min()
 
-            if len(actual_keys) == 0:
-                st.error("计划表中未识别到关键字段（产品名称/耗材名称、规格/型号、厂商/生产厂商）。")
-            else:
-                # 汇总字段
-                agg_dict = {}
-                if '数量' in full_plan_raw.columns:
-                    agg_dict['数量'] = 'sum'
-                if '金额' in full_plan_raw.columns:
-                    agg_dict['金额'] = 'sum'
+            agg_dict = {}
+            if '数量' in full_plan_raw.columns:
+                agg_dict['数量'] = 'sum'
+            if '金额' in full_plan_raw.columns:
+                agg_dict['金额'] = 'sum'
 
-                # 先取每个物料第一次出现的位置，用于保持顺序
-                order_df = full_plan_raw.groupby(actual_keys, as_index=False)['_order'].min()
+            full_plan = full_plan_raw.groupby(JOIN_KEYS, as_index=False, dropna=False).agg(agg_dict)
+            full_plan = pd.merge(full_plan, order_df, on=JOIN_KEYS, how='left').sort_values('_order')
 
-                # 计划汇总
-                full_plan = full_plan_raw.groupby(actual_keys, as_index=False).agg(agg_dict)
-
-                # 顺序合并回去并排序
-                full_plan = pd.merge(full_plan, order_df, on=actual_keys, how='left')
-                full_plan = full_plan.sort_values('_order')
-
-                if stock_file:
-                    stock_df = load_new_smart(stock_file)
-                    if stock_df is not None:
-                        if '仓库库存' not in stock_df.columns:
-                            st.error("结存表中未识别到“结存数量/仓库库存”字段。")
-                        else:
-                            # 仓库汇总
-                            s_sum = stock_df.groupby(actual_keys, as_index=False)['仓库库存'].sum()
-
-                            # 左连接：以计划为主（保持计划顺序）
-                            merged = pd.merge(full_plan, s_sum, on=actual_keys, how='left')
-                            merged = merged.sort_values('_order')
-
-                            # 未匹配库存：数量/金额写缺失
-                            mask_no_stock = merged['仓库库存'].isna()
-                            for col in ['数量', '金额']:
-                                if col in merged.columns:
-                                    merged.loc[mask_no_stock, col] = pd.NA
-
-                            # 去掉顺序列再展示
-                            merged_show = merged.drop(columns=['_order'])
-
-                            st.header("🔍 计划与库存联动清单 (匹配规则：名称+型号+厂商)")
-                            st.dataframe(
-                                merged_show.style.format(precision=0, na_rep="缺失"),
-                                use_container_width=True
-                            )
-                    else:
-                        st.error("结存表解析失败。")
+            if stock_file:
+                stock_df = load_new_smart(stock_file)
+                if stock_df is None or '仓库库存' not in stock_df.columns:
+                    st.error("结存表解析失败或缺少库存字段（结存数量/仓库库存）。")
                 else:
-                    full_plan_show = full_plan.drop(columns=['_order'])
-                    st.dataframe(full_plan_show, use_container_width=True)
+                    # 结存汇总（同物料相加），dropna=False 让缺规格的行也保留，但它不会匹配到有规格的计划行
+                    s_sum = stock_df.groupby(JOIN_KEYS, as_index=False, dropna=False)['仓库库存'].sum()
+
+                    # 左连接：严格三键
+                    merged = pd.merge(full_plan, s_sum, on=JOIN_KEYS, how='left').sort_values('_order')
+
+                    # ✅ 只要库存缺失（说明三键没匹配到，包括“规格缺失导致不匹配”）→ 数量金额标缺失
+                    mask_no_stock = merged['仓库库存'].isna()
+                    for col in ['数量', '金额']:
+                        if col in merged.columns:
+                            merged.loc[mask_no_stock, col] = pd.NA
+
+                    merged_show = merged.drop(columns=['_order'])
+
+                    st.header("🔍 计划与库存联动清单 (匹配规则：名称+型号+厂商，缺任一键=不匹配)")
+                    st.dataframe(
+                        merged_show.style.format(precision=0, na_rep="缺失"),
+                        use_container_width=True
+                    )
+            else:
+                st.dataframe(full_plan.drop(columns=['_order']), use_container_width=True)
