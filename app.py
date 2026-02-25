@@ -275,7 +275,7 @@ else:
 
                     merged_show = merged.drop(columns=['_order'])
 
-                    st.header("🔍 计划与库存联动清单 (匹配规则：名称+型号+厂商，缺任一键=不匹配)")
+                    st.header("🔍 计划与库存联动清单 ")
                     st.dataframe(
                         merged_show.style.format(precision=0, na_rep="缺失"),
                         use_container_width=True
@@ -284,3 +284,4 @@ else:
                 st.dataframe(full_plan.drop(columns=['_order']), use_container_width=True)
     else:
         st.info("💡 请在左侧上传计划表与结存表以进行联动分析。")
+
