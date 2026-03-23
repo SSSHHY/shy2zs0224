@@ -23,7 +23,7 @@ st.sidebar.markdown("---")
 st.sidebar.header("📁 上传区域")
 
 # =========================
-# 旧版：多月计划对比分析（按你给的参考版本改造）
+# 旧版：多月计划对比分析（完全原封不动）
 # =========================
 if mode == "旧版：多月计划对比分析":
     uploaded_files = st.sidebar.file_uploader(
@@ -180,7 +180,7 @@ if mode == "旧版：多月计划对比分析":
         st.info("💡 请在左侧上传至少两个月份的采购计划表，系统将自动计算跨月平均值及新增变动。")
 
 # =========================
-# 新版：计划与仓库联动（固定为你确认 ok 的版本）
+# 新版：计划与仓库联动（已修改：计划表原样输出，不进行合并）
 # =========================
 else:
     plan_files = st.sidebar.file_uploader("1. 上传【新版计划表】", accept_multiple_files=True, type=['csv', 'xlsx', 'xls'])
@@ -245,34 +245,24 @@ else:
     if plan_files:
         plans = [load_new_smart(f) for f in plan_files if load_new_smart(f) is not None]
         if plans:
-            full_plan_raw = pd.concat(plans, ignore_index=True)
-            full_plan_raw['_order'] = range(len(full_plan_raw))
-
-            order_df = full_plan_raw.groupby(JOIN_KEYS, as_index=False, dropna=False)['_order'].min()
-
-            agg_dict = {}
-            if '数量' in full_plan_raw.columns:
-                agg_dict['数量'] = 'sum'
-            if '金额' in full_plan_raw.columns:
-                agg_dict['金额'] = 'sum'
-
-            full_plan = full_plan_raw.groupby(JOIN_KEYS, as_index=False, dropna=False).agg(agg_dict)
-            full_plan = pd.merge(full_plan, order_df, on=JOIN_KEYS, how='left').sort_values('_order')
+            # 1. 这里直接合并所有计划表，不再做 groupby 汇总处理
+            full_plan = pd.concat(plans, ignore_index=True)
+            
+            # 记录原始顺序，保证左连接匹配后顺序不乱
+            full_plan['_order'] = range(len(full_plan))
 
             if stock_file:
                 stock_df = load_new_smart(stock_file)
                 if stock_df is None or '仓库库存' not in stock_df.columns:
                     st.error("结存表解析失败或缺少库存字段（结存数量/仓库库存）。")
                 else:
+                    # 2. 仓库结存表依然需要汇总（因为仓库里同款产品的总库存是固定的）
                     s_sum = stock_df.groupby(JOIN_KEYS, as_index=False, dropna=False)['仓库库存'].sum()
 
+                    # 3. 将汇总后的库存，通过左连接匹配到【原汁原味】的计划表上
                     merged = pd.merge(full_plan, s_sum, on=JOIN_KEYS, how='left').sort_values('_order')
 
-                    mask_no_stock = merged['仓库库存'].isna()
-                    for col in ['数量', '金额']:
-                        if col in merged.columns:
-                            merged.loc[mask_no_stock, col] = pd.NA
-
+                    # 移除用于排序的辅助列
                     merged_show = merged.drop(columns=['_order'])
 
                     st.header("🔍 计划与库存联动清单 ")
@@ -281,7 +271,7 @@ else:
                         use_container_width=True
                     )
             else:
+                # 如果没有上传库存表，也直接展示原汁原味的计划表
                 st.dataframe(full_plan.drop(columns=['_order']), use_container_width=True)
     else:
         st.info("💡 请在左侧上传计划表与结存表以进行联动分析。")
-
