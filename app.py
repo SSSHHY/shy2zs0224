@@ -20,7 +20,7 @@ mode = st.sidebar.radio(
     "请选择功能模式",
     ["旧版：多月计划对比分析", "新版：计划与仓库联动"]
 )
-st.sidebar.caption("当前版本：库存外连接导出版（保留库存独有规格）")
+st.sidebar.caption("当前版本：仅输出结存数量")
 st.sidebar.markdown("---")
 st.sidebar.header("📁 上传区域")
 
@@ -315,33 +315,6 @@ else:
                     )
                     merged = merged.sort_values('_sort_order')
 
-                    stock_matched = merged['_stock_match'].eq('both')
-                    stock_only = merged['_stock_match'].eq('right_only')
-                    plan_only = merged['_stock_match'].eq('left_only')
-                    merged['库存匹配状态'] = merged['_stock_match'].map({
-                        'both': '已匹配',
-                        'left_only': '未匹配库存',
-                        'right_only': '仅库存未列入计划',
-                    })
-
-                    if '数量' in merged.columns and '可用数量' in merged.columns:
-                        merged['库存是否够用'] = pd.NA
-                        qty_missing = merged['数量'].isna()
-                        stock_qty_missing = merged['可用数量'].isna()
-                        can_compare_stock = stock_matched & ~qty_missing & ~stock_qty_missing
-                        enough_stock = pd.Series(False, index=merged.index)
-                        enough_stock.loc[can_compare_stock] = (
-                            merged.loc[can_compare_stock, '可用数量'] >=
-                            merged.loc[can_compare_stock, '数量']
-                        )
-
-                        merged.loc[plan_only, '库存是否够用'] = '未匹配库存'
-                        merged.loc[stock_only, '库存是否够用'] = '库存未列入计划'
-                        merged.loc[stock_matched & qty_missing, '库存是否够用'] = '未填计划数量'
-                        merged.loc[stock_matched & ~qty_missing & stock_qty_missing, '库存是否够用'] = '库存数量缺失'
-                        merged.loc[can_compare_stock & enough_stock, '库存是否够用'] = '库存足够'
-                        merged.loc[can_compare_stock & ~enough_stock, '库存是否够用'] = '库存不足'
-
                     merged_show = merged.drop(columns=['_order', '_sort_order', '_stock_match'], errors='ignore')
                     if '结存数量' in merged_show.columns:
                         merged_show['仓库库存'] = merged_show['结存数量']
@@ -353,9 +326,6 @@ else:
                     merged_show = merged_show[output_cols]
 
                     st.header("🔍 计划与库存联动清单 ")
-                    st.caption(
-                        f"共 {len(merged_show)} 行；其中库存表有但计划表没有的规格 {int(stock_only.sum())} 行。"
-                    )
                     st.dataframe(
                         merged_show.style.format(precision=0, na_rep="缺失"),
                         use_container_width=True
@@ -365,7 +335,7 @@ else:
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
                         merged_show.to_excel(writer, index=False, sheet_name='计划库存联动')
                     st.download_button(
-                        "下载联动清单 Excel（含库存独有规格）",
+                        "下载联动清单 Excel",
                         data=output.getvalue(),
                         file_name="计划与库存联动清单.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
