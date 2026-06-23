@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from io import BytesIO
 
 # 1. 页面配置与 Win7 兼容补丁
 st.set_page_config(page_title="医疗器械采购智能分析平台", layout="wide")
@@ -23,7 +24,7 @@ st.sidebar.markdown("---")
 st.sidebar.header("📁 上传区域")
 
 # =========================
-# 旧版：多月计划对比分析（完全原封不动）
+# 旧版：多月计划对比分析（按你给的参考版本改造）
 # =========================
 if mode == "旧版：多月计划对比分析":
     uploaded_files = st.sidebar.file_uploader(
@@ -180,13 +181,14 @@ if mode == "旧版：多月计划对比分析":
         st.info("💡 请在左侧上传至少两个月份的采购计划表，系统将自动计算跨月平均值及新增变动。")
 
 # =========================
-# 新版：计划与仓库联动（已修改：计划表原样输出，不进行合并）
+# 新版：计划与仓库联动（固定为你确认 ok 的版本）
 # =========================
 else:
     plan_files = st.sidebar.file_uploader("1. 上传【新版计划表】", accept_multiple_files=True, type=['csv', 'xlsx', 'xls'])
     stock_file = st.sidebar.file_uploader("2. 上传【仓库结存表】", type=['csv', 'xlsx', 'xls'])
 
     JOIN_KEYS = ['产品名称', '型号', '生产厂商']
+    STOCK_COLS = ['结存数量', '预留数量', '可用数量']
 
     def load_new_smart(file):
         try:
@@ -216,10 +218,14 @@ else:
                 '厂商': '生产厂商',
                 '生产厂家': '生产厂商',
                 '生产厂商': '生产厂商',
-                '结存数量': '仓库库存',
-                '仓库库存': '仓库库存',
+                '结存数量': '结存数量',
+                '仓库库存': '结存数量',
+                '预留数量': '预留数量',
+                '可用数量': '可用数量',
             }
             df.rename(columns=lambda x: name_map.get(str(x).strip(), str(x).strip()), inplace=True)
+            if df.columns.duplicated().any():
+                df = df.T.groupby(level=0, sort=False).first().T
 
             for k in JOIN_KEYS:
                 if k not in df.columns:
@@ -232,9 +238,16 @@ else:
                     value=pd.NA
                 )
 
-            for col in ['数量', '金额', '价格', '仓库库存']:
+            for col in ['数量', '金额', '价格'] + STOCK_COLS:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            if '可用数量' not in df.columns and '结存数量' in df.columns:
+                if '预留数量' in df.columns:
+                    df['可用数量'] = df['结存数量'].fillna(0) - df['预留数量'].fillna(0)
+                    df.loc[df['结存数量'].isna(), '可用数量'] = pd.NA
+                else:
+                    df['可用数量'] = df['结存数量']
 
             return df
 
@@ -243,35 +256,117 @@ else:
             return None
 
     if plan_files:
-        plans = [load_new_smart(f) for f in plan_files if load_new_smart(f) is not None]
+        plans = []
+        for f in plan_files:
+            loaded_plan = load_new_smart(f)
+            if loaded_plan is not None:
+                plans.append(loaded_plan)
+
         if plans:
-            # 1. 这里直接合并所有计划表，不再做 groupby 汇总处理
-            full_plan = pd.concat(plans, ignore_index=True)
-            
-            # 记录原始顺序，保证左连接匹配后顺序不乱
-            full_plan['_order'] = range(len(full_plan))
+            full_plan_raw = pd.concat(plans, ignore_index=True)
+            full_plan_raw['_order'] = range(len(full_plan_raw))
+
+            order_df = full_plan_raw.groupby(JOIN_KEYS, as_index=False, dropna=False)['_order'].min()
+
+            plan_value_cols = []
+            if '数量' in full_plan_raw.columns:
+                plan_value_cols.append('数量')
+            if '金额' in full_plan_raw.columns:
+                plan_value_cols.append('金额')
+
+            if plan_value_cols:
+                full_plan = (
+                    full_plan_raw
+                    .groupby(JOIN_KEYS, dropna=False)[plan_value_cols]
+                    .sum(min_count=1)
+                    .reset_index()
+                )
+            else:
+                full_plan = full_plan_raw[JOIN_KEYS].drop_duplicates()
+            full_plan = pd.merge(full_plan, order_df, on=JOIN_KEYS, how='left').sort_values('_order')
 
             if stock_file:
                 stock_df = load_new_smart(stock_file)
-                if stock_df is None or '仓库库存' not in stock_df.columns:
-                    st.error("结存表解析失败或缺少库存字段（结存数量/仓库库存）。")
+                stock_value_cols = [col for col in STOCK_COLS if stock_df is not None and col in stock_df.columns]
+
+                if stock_df is None or not stock_value_cols:
+                    st.error("结存表解析失败或缺少库存字段（结存数量/预留数量/可用数量）。")
                 else:
-                    # 2. 仓库结存表依然需要汇总（因为仓库里同款产品的总库存是固定的）
-                    s_sum = stock_df.groupby(JOIN_KEYS, as_index=False, dropna=False)['仓库库存'].sum()
+                    s_sum = (
+                        stock_df
+                        .groupby(JOIN_KEYS, dropna=False)[stock_value_cols]
+                        .sum(min_count=1)
+                        .reset_index()
+                    )
 
-                    # 3. 将汇总后的库存，通过左连接匹配到【原汁原味】的计划表上
-                    merged = pd.merge(full_plan, s_sum, on=JOIN_KEYS, how='left').sort_values('_order')
+                    merged = pd.merge(
+                        full_plan,
+                        s_sum,
+                        on=JOIN_KEYS,
+                        how='outer',
+                        indicator='_stock_match'
+                    )
+                    merged['_sort_order'] = merged['_order']
+                    stock_only_sort = merged['_sort_order'].isna()
+                    merged.loc[stock_only_sort, '_sort_order'] = range(
+                        len(full_plan_raw),
+                        len(full_plan_raw) + stock_only_sort.sum()
+                    )
+                    merged = merged.sort_values('_sort_order')
 
-                    # 移除用于排序的辅助列
-                    merged_show = merged.drop(columns=['_order'])
+                    stock_matched = merged['_stock_match'].eq('both')
+                    stock_only = merged['_stock_match'].eq('right_only')
+                    plan_only = merged['_stock_match'].eq('left_only')
+                    merged['库存匹配状态'] = merged['_stock_match'].map({
+                        'both': '已匹配',
+                        'left_only': '未匹配库存',
+                        'right_only': '仅库存未列入计划',
+                    })
+
+                    if '数量' in merged.columns and '可用数量' in merged.columns:
+                        merged['库存是否够用'] = pd.NA
+                        qty_missing = merged['数量'].isna()
+                        stock_qty_missing = merged['可用数量'].isna()
+                        can_compare_stock = stock_matched & ~qty_missing & ~stock_qty_missing
+                        enough_stock = pd.Series(False, index=merged.index)
+                        enough_stock.loc[can_compare_stock] = (
+                            merged.loc[can_compare_stock, '可用数量'] >=
+                            merged.loc[can_compare_stock, '数量']
+                        )
+
+                        merged.loc[plan_only, '库存是否够用'] = '未匹配库存'
+                        merged.loc[stock_only, '库存是否够用'] = '库存未列入计划'
+                        merged.loc[stock_matched & qty_missing, '库存是否够用'] = '未填计划数量'
+                        merged.loc[stock_matched & ~qty_missing & stock_qty_missing, '库存是否够用'] = '库存数量缺失'
+                        merged.loc[can_compare_stock & enough_stock, '库存是否够用'] = '库存足够'
+                        merged.loc[can_compare_stock & ~enough_stock, '库存是否够用'] = '库存不足'
+
+                    merged_show = merged.drop(columns=['_order', '_sort_order', '_stock_match'], errors='ignore')
+                    preferred_cols = JOIN_KEYS + [
+                        '数量', '金额',
+                        '结存数量', '预留数量', '可用数量',
+                        '库存匹配状态', '库存是否够用'
+                    ]
+                    ordered_cols = [col for col in preferred_cols if col in merged_show.columns]
+                    ordered_cols += [col for col in merged_show.columns if col not in ordered_cols]
+                    merged_show = merged_show[ordered_cols]
 
                     st.header("🔍 计划与库存联动清单 ")
                     st.dataframe(
                         merged_show.style.format(precision=0, na_rep="缺失"),
                         use_container_width=True
                     )
+
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        merged_show.to_excel(writer, index=False, sheet_name='计划库存联动')
+                    st.download_button(
+                        "下载联动清单 Excel",
+                        data=output.getvalue(),
+                        file_name="计划与库存联动清单.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
             else:
-                # 如果没有上传库存表，也直接展示原汁原味的计划表
                 st.dataframe(full_plan.drop(columns=['_order']), use_container_width=True)
     else:
         st.info("💡 请在左侧上传计划表与结存表以进行联动分析。")
