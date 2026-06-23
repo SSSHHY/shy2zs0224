@@ -342,14 +342,14 @@ else:
                         merged.loc[can_compare_stock & ~enough_stock, '库存是否够用'] = '库存不足'
 
                     merged_show = merged.drop(columns=['_order', '_sort_order', '_stock_match'], errors='ignore')
-                    preferred_cols = JOIN_KEYS + [
-                        '数量', '金额',
-                        '结存数量', '预留数量', '可用数量',
-                        '库存匹配状态', '库存是否够用'
-                    ]
-                    ordered_cols = [col for col in preferred_cols if col in merged_show.columns]
-                    ordered_cols += [col for col in merged_show.columns if col not in ordered_cols]
-                    merged_show = merged_show[ordered_cols]
+                    if '结存数量' in merged_show.columns:
+                        merged_show['仓库库存'] = merged_show['结存数量']
+
+                    output_cols = JOIN_KEYS + ['数量', '金额', '仓库库存']
+                    for col in output_cols:
+                        if col not in merged_show.columns:
+                            merged_show[col] = pd.NA
+                    merged_show = merged_show[output_cols]
 
                     st.header("🔍 计划与库存联动清单 ")
                     st.dataframe(
