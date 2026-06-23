@@ -20,6 +20,7 @@ mode = st.sidebar.radio(
     "请选择功能模式",
     ["旧版：多月计划对比分析", "新版：计划与仓库联动"]
 )
+st.sidebar.caption("当前版本：库存外连接导出版（保留库存独有规格）")
 st.sidebar.markdown("---")
 st.sidebar.header("📁 上传区域")
 
@@ -352,6 +353,9 @@ else:
                     merged_show = merged_show[output_cols]
 
                     st.header("🔍 计划与库存联动清单 ")
+                    st.caption(
+                        f"共 {len(merged_show)} 行；其中库存表有但计划表没有的规格 {int(stock_only.sum())} 行。"
+                    )
                     st.dataframe(
                         merged_show.style.format(precision=0, na_rep="缺失"),
                         use_container_width=True
@@ -361,7 +365,7 @@ else:
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
                         merged_show.to_excel(writer, index=False, sheet_name='计划库存联动')
                     st.download_button(
-                        "下载联动清单 Excel",
+                        "下载联动清单 Excel（含库存独有规格）",
                         data=output.getvalue(),
                         file_name="计划与库存联动清单.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
