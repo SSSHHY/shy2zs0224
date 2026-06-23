@@ -20,7 +20,7 @@ mode = st.sidebar.radio(
     "请选择功能模式",
     ["旧版：多月计划对比分析", "新版：计划与仓库联动"]
 )
-st.sidebar.caption("当前版本：仅输出结存数量")
+st.sidebar.caption("当前版本：计划模板为主，仅补结存数量")
 st.sidebar.markdown("---")
 st.sidebar.header("📁 上传区域")
 
@@ -266,25 +266,7 @@ else:
         if plans:
             full_plan_raw = pd.concat(plans, ignore_index=True)
             full_plan_raw['_order'] = range(len(full_plan_raw))
-
-            order_df = full_plan_raw.groupby(JOIN_KEYS, as_index=False, dropna=False)['_order'].min()
-
-            plan_value_cols = []
-            if '数量' in full_plan_raw.columns:
-                plan_value_cols.append('数量')
-            if '金额' in full_plan_raw.columns:
-                plan_value_cols.append('金额')
-
-            if plan_value_cols:
-                full_plan = (
-                    full_plan_raw
-                    .groupby(JOIN_KEYS, dropna=False)[plan_value_cols]
-                    .sum(min_count=1)
-                    .reset_index()
-                )
-            else:
-                full_plan = full_plan_raw[JOIN_KEYS].drop_duplicates()
-            full_plan = pd.merge(full_plan, order_df, on=JOIN_KEYS, how='left').sort_values('_order')
+            full_plan = full_plan_raw.drop(columns=STOCK_COLS, errors='ignore').copy()
 
             if stock_file:
                 stock_df = load_new_smart(stock_file)
@@ -304,18 +286,11 @@ else:
                         full_plan,
                         s_sum,
                         on=JOIN_KEYS,
-                        how='outer',
-                        indicator='_stock_match'
+                        how='left'
                     )
-                    merged['_sort_order'] = merged['_order']
-                    stock_only_sort = merged['_sort_order'].isna()
-                    merged.loc[stock_only_sort, '_sort_order'] = range(
-                        len(full_plan_raw),
-                        len(full_plan_raw) + stock_only_sort.sum()
-                    )
-                    merged = merged.sort_values('_sort_order')
+                    merged = merged.sort_values('_order')
 
-                    merged_show = merged.drop(columns=['_order', '_sort_order', '_stock_match'], errors='ignore')
+                    merged_show = merged.drop(columns=['_order'], errors='ignore')
                     if '结存数量' in merged_show.columns:
                         merged_show['仓库库存'] = merged_show['结存数量']
 
